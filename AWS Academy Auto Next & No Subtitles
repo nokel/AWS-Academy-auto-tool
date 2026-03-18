@@ -1,0 +1,126 @@
+// ==UserScript==
+// @name         AWS Academy Auto Next & No Subtitles
+// @namespace    http://tampermonkey.net/
+// @version      1.0
+// @description  Auto-play, disable subtitles, auto-advance
+// @match        https://awsacademy.instructure.com/*
+// @match        https://emergingtalent.contentcontroller.com/*
+// @inject-into  page
+// @grant        none
+// @run-at       document-idle
+// ==/UserScript==
+
+(function () {
+  'use strict';
+
+  // Canvas
+  if (location.hostname === 'awsacademy.instructure.com') {
+
+    function clickNext() {
+      const el = document.querySelector('a[aria-label="Next Module Item"]');
+      if (el?.href) { window.location.href = el.href; return; }
+      let tries = 0;
+      const retry = setInterval(() => {
+        const el = document.querySelector('a[aria-label="Next Module Item"]');
+        if (el?.href) { clearInterval(retry); window.location.href = el.href; }
+        if (++tries >= 10) clearInterval(retry);
+      }, 800);
+    }
+
+    window.addEventListener('message', (e) => {
+      if (!e.origin.includes('emergingtalent.contentcontroller.com')) return;
+      if (e.data?.type === 'awsVideoEnded') clickNext();
+    });
+
+    return;
+  }
+
+  if (!location.hostname.includes('emergingtalent.contentcontroller.com')) return;
+
+  // Relay frames
+  if (!location.href.includes('modern.html')) {
+    window.addEventListener('message', (e) => {
+      if (e.data?.type === 'awsVideoEnded')
+        window.parent.postMessage({ type: 'awsVideoEnded' }, '*');
+    });
+    return;
+  }
+
+  // modern.html
+  let hasPlayed = false;
+  let endSignalSent = false;
+
+  function sendEndedSignal() {
+    if (endSignalSent || !hasPlayed) return;
+    endSignalSent = true;
+    window.parent.postMessage({ type: 'awsVideoEnded' }, '*');
+  }
+
+  function disableSubtitles(p, doc) {
+    const tracks = p.textTracks();
+    for (let i = 0; i < tracks.length; i++) tracks[i].mode = 'disabled';
+    tracks.addEventListener('addtrack', e => { e.track.mode = 'disabled'; });
+    const subsBtn = doc.querySelector('.vjs-subs-caps-button');
+    if (subsBtn) {
+      subsBtn.click();
+      setTimeout(() => {
+        const offItem = [...doc.querySelectorAll('.vjs-menu-item')]
+          .find(el => /^off$/i.test(el.textContent.trim()));
+        if (offItem) offItem.click();
+        else subsBtn.click();
+      }, 400);
+    }
+  }
+
+  function hookPlayer(p, doc, frame) {
+    disableSubtitles(p, doc);
+    setTimeout(() => disableSubtitles(p, doc), 2000);
+
+    p.on('play', () => { hasPlayed = true; });
+    p.on('ended', () => sendEndedSignal());
+
+    p.ready(() => {
+      p.muted(true);
+
+      const playPromise = p.play();
+
+      if (playPromise !== undefined) {
+        playPromise
+          .then(() => {
+            setTimeout(() => {
+              p.muted(false);
+            }, 100);
+          })
+          .catch(err => {
+            console.log('[AWS Helper] Autoplay prevented:', err);
+            // Optional: Add a "Click to unmute" button here
+          });
+      }
+    });
+  }
+
+  function findAndHookPlayer() {
+    const scormFrame = document.querySelector('iframe[name="ScormContent"]');
+    if (!scormFrame) return false;
+    try {
+      const win = scormFrame.contentWindow;
+      const doc = scormFrame.contentDocument;
+      if (!win || !win.videojs) return false;
+      const players = Object.values(win.videojs.players || {}).filter(Boolean);
+      if (!players.length) return false;
+
+      hookPlayer(players[0], doc, scormFrame);
+      return true;
+    } catch(e) {
+      console.log('[AWS Helper] error:', e.message);
+      return false;
+    }
+  }
+
+  const poll = setInterval(() => {
+    if (findAndHookPlayer()) clearInterval(poll);
+  }, 300);
+
+  setTimeout(() => clearInterval(poll), 30000);
+
+})();
