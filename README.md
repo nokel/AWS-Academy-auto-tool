@@ -1,7 +1,7 @@
 # AWS-Academy-auto-tool
 A userscript tool that makes aws academy a little less annoying
 
- - automatically turn off subtitles, 
+ - Keeps persistant settings like subtitle state, speed, and resolution, 
  - automatically go to next video in module, and
  - automatically play video in next module.
 
