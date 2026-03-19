@@ -1,8 +1,8 @@
 // ==UserScript==
-// @name         AWS Academy Auto Next & No Subtitles
+// @name         AWS Academy Auto Next & Persistent Settings
 // @namespace    http://tampermonkey.net/
-// @version      1.0
-// @description  Auto-play, disable subtitles, auto-advance
+// @version      2.0
+// @description  Auto-play, auto-advance, and remember video settings
 // @match        https://awsacademy.instructure.com/*
 // @match        https://emergingtalent.contentcontroller.com/*
 // @inject-into  page
@@ -13,16 +13,37 @@
 (function () {
   'use strict';
 
+  const SETTINGS_KEY = 'awsHelperSettings';
+
+  function getSettings() {
+    try {
+      return JSON.parse(localStorage.getItem(SETTINGS_KEY)) || {};
+    } catch {
+      return {};
+    }
+  }
+
+  function saveSettings(newSettings) {
+    const current = getSettings();
+    const updated = { ...current, ...newSettings };
+    localStorage.setItem(SETTINGS_KEY, JSON.stringify(updated));
+  }
+
   // Canvas
+
   if (location.hostname === 'awsacademy.instructure.com') {
 
     function clickNext() {
       const el = document.querySelector('a[aria-label="Next Module Item"]');
       if (el?.href) { window.location.href = el.href; return; }
+
       let tries = 0;
       const retry = setInterval(() => {
         const el = document.querySelector('a[aria-label="Next Module Item"]');
-        if (el?.href) { clearInterval(retry); window.location.href = el.href; }
+        if (el?.href) {
+          clearInterval(retry);
+          window.location.href = el.href;
+        }
         if (++tries >= 10) clearInterval(retry);
       }, 800);
     }
@@ -46,7 +67,9 @@
     return;
   }
 
+
   // modern.html
+
   let hasPlayed = false;
   let endSignalSent = false;
 
@@ -56,25 +79,86 @@
     window.parent.postMessage({ type: 'awsVideoEnded' }, '*');
   }
 
-  function disableSubtitles(p, doc) {
+  function applySubtitlePreference(p) {
+    const settings = getSettings();
     const tracks = p.textTracks();
-    for (let i = 0; i < tracks.length; i++) tracks[i].mode = 'disabled';
-    tracks.addEventListener('addtrack', e => { e.track.mode = 'disabled'; });
-    const subsBtn = doc.querySelector('.vjs-subs-caps-button');
-    if (subsBtn) {
-      subsBtn.click();
-      setTimeout(() => {
-        const offItem = [...doc.querySelectorAll('.vjs-menu-item')]
-          .find(el => /^off$/i.test(el.textContent.trim()));
-        if (offItem) offItem.click();
-        else subsBtn.click();
-      }, 400);
+
+    if (!settings.subtitle) {
+
+      for (let i = 0; i < tracks.length; i++) {
+        tracks[i].mode = 'disabled';
+      }
+      return;
+    }
+
+    for (let i = 0; i < tracks.length; i++) {
+      const t = tracks[i];
+      if (
+        t.language === settings.subtitle.language ||
+        t.label === settings.subtitle.label
+      ) {
+        t.mode = 'showing';
+      } else {
+        t.mode = 'disabled';
+      }
     }
   }
 
-  function hookPlayer(p, doc, frame) {
-    disableSubtitles(p, doc);
-    setTimeout(() => disableSubtitles(p, doc), 2000);
+  function hookPlayer(p, doc) {
+    const settings = getSettings();
+
+    if (settings.playbackRate) {
+      p.playbackRate(settings.playbackRate);
+    }
+
+    p.on('ratechange', () => {
+      saveSettings({ playbackRate: p.playbackRate() });
+    });
+
+    const tracks = p.textTracks();
+
+    function saveTrackState() {
+      let activeTrack = null;
+
+      for (let i = 0; i < tracks.length; i++) {
+        if (tracks[i].mode === 'showing') {
+          activeTrack = {
+            language: tracks[i].language,
+            label: tracks[i].label
+          };
+        }
+      }
+
+      saveSettings({ subtitle: activeTrack });
+    }
+
+    tracks.addEventListener('change', saveTrackState);
+
+
+    applySubtitlePreference(p);
+
+    tracks.addEventListener('addtrack', () => {
+      setTimeout(() => applySubtitlePreference(p), 200);
+    });
+
+    p.ready(() => {
+      const qualityLevels = p.qualityLevels?.();
+      if (!qualityLevels) return;
+
+      qualityLevels.on('change', () => {
+        const current = [...qualityLevels].find(q => q.enabled);
+        if (current) {
+          saveSettings({ resolution: current.height });
+        }
+      });
+
+      const settings = getSettings();
+      if (settings.resolution) {
+        [...qualityLevels].forEach(q => {
+          q.enabled = q.height === settings.resolution;
+        });
+      }
+    });
 
     p.on('play', () => { hasPlayed = true; });
     p.on('ended', () => sendEndedSignal());
@@ -93,7 +177,6 @@
           })
           .catch(err => {
             console.log('[AWS Helper] Autoplay prevented:', err);
-            // Optional: Add a "Click to unmute" button here
           });
       }
     });
@@ -102,16 +185,20 @@
   function findAndHookPlayer() {
     const scormFrame = document.querySelector('iframe[name="ScormContent"]');
     if (!scormFrame) return false;
+
     try {
       const win = scormFrame.contentWindow;
       const doc = scormFrame.contentDocument;
+
       if (!win || !win.videojs) return false;
+
       const players = Object.values(win.videojs.players || {}).filter(Boolean);
       if (!players.length) return false;
 
-      hookPlayer(players[0], doc, scormFrame);
+      hookPlayer(players[0], doc);
       return true;
-    } catch(e) {
+
+    } catch (e) {
       console.log('[AWS Helper] error:', e.message);
       return false;
     }
